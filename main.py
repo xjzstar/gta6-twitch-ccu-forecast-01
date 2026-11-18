@@ -18,7 +18,9 @@ spread estimate noisy) and widened a little as the day goes on, and the
 five quantiles are median * exp(z * sd).  Medians
 are lightly smoothed across neighbouring hours, log-ratios are clamped to
 the range the pool actually shows, and every failure path falls back to a
-persistence forecast so a case always yields a valid file.
+persistence forecast so a case always yields a valid file: quantiles are
+floored at one viewer, since the contract requires positive values and a
+tiny prediction could otherwise round to zero.
 
 Standard library only, offline, deterministic.
 
@@ -45,6 +47,7 @@ MIN_POOL_H1 = 1000      # a comparable's launch-day hour 1 must reach this
 NEIGHBOURS = 8          # k for the kNN estimate
 BANDWIDTH = 0.7         # Gaussian kernel width, in ln(viewers) units
 MIN_SD = 0.05           # never report a tighter spread than this
+MAX_SD = 1.5            # nor a wider one, however wild a single hour looks
 DRIFT_SD = 0.05         # extra log-sd accumulated per sqrt(hour - 1)
 BASE_SD = 0.15          # persistence fallback spread, per sqrt(hour - 1)
 MAX_VIEWERS = 1e9
@@ -63,7 +66,7 @@ def round2(x):
 def persistence_row(p1, h):
     """Flat median at hour 1's print, spread growing like a random walk."""
     sd = BASE_SD * math.sqrt(h - 1)
-    return [round2(p1 * math.exp(z * sd)) for z in Z]
+    return [max(round2(p1 * math.exp(z * sd)), 1) for z in Z]
 
 
 def launch_curve(comp):
@@ -184,6 +187,12 @@ def model_rows(p1, pool):
     for h in HOURS:
         var = (n_eff * spreads[h] ** 2 + prior * pooled_var) / (n_eff + prior)
         spreads[h] = max(math.sqrt(var), MIN_SD)
+    # Cap the spread: with only a few dozen launches, one wild hour can
+    # leave a huge residual sd, and exp(1.645 * sd) would turn that into an
+    # absurd quantile range.  The cap sits far above any spread the pooled
+    # hours actually show, so it only binds in pathological cases.
+    for h in HOURS:
+        spreads[h] = min(spreads[h], MAX_SD)
     # Light smoothing of the median curve: each hour leans on its neighbours.
     smooth = {}
     for pos, h in enumerate(HOURS):
@@ -203,7 +212,10 @@ def model_rows(p1, pool):
         qs = [centre * math.exp(z * sd) for z in Z]
         qs = [min(max(q, 1e-6), MAX_VIEWERS) for q in qs]
         qs.sort()
-        rows[h] = [round2(q) for q in qs]
+        # Floor at one viewer after rounding: the contract requires every
+        # quantile to be positive, and a tiny value could round to 0.00.
+        # The floor is monotone, so the sorted order survives it.
+        rows[h] = [max(round2(q), 1) for q in qs]
     return rows
 
 
