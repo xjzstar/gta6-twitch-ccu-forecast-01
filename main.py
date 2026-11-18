@@ -12,8 +12,10 @@ later follow a completely different curve.  For each hour, the median
 log-ratio is the geometric-mean blend of two local estimates over
 ln(hour-1 viewers): a k-nearest-neighbour weighted average (k = 8, Gaussian
 kernel, bandwidth 0.7) and a kernel-weighted local-linear regression.  The
-spread comes from the residuals around that regression, widened a little as
-the day goes on, and the five quantiles are median * exp(z * sd).  Medians
+spread comes from the residuals around that regression, shrunk toward the
+pooled spread across hours (a few dozen launches make any single hour's
+spread estimate noisy) and widened a little as the day goes on, and the
+five quantiles are median * exp(z * sd).  Medians
 are lightly smoothed across neighbouring hours, log-ratios are clamped to
 the range the pool actually shows, and every failure path falls back to a
 persistence forecast so a case always yields a valid file.
@@ -171,6 +173,17 @@ def model_rows(p1, pool):
             blended = 0.5 * (near + fit)
         medians[h] = min(max(blended, lo), hi)
         spreads[h] = max(sd, MIN_SD)
+    # Shrink each hour's residual spread toward the pooled spread: with only
+    # a few dozen launches the per-hour estimates are noisy, so borrow
+    # strength across hours, weighted by the kernel's effective sample size.
+    weights = [kernel(x - xt) for x, _ in pool]
+    wsum = sum(weights)
+    n_eff = wsum * wsum / sum(w * w for w in weights) if wsum > 0.0 else 0.0
+    pooled_var = sum(s * s for s in spreads.values()) / len(spreads)
+    prior = 8.0
+    for h in HOURS:
+        var = (n_eff * spreads[h] ** 2 + prior * pooled_var) / (n_eff + prior)
+        spreads[h] = max(math.sqrt(var), MIN_SD)
     # Light smoothing of the median curve: each hour leans on its neighbours.
     smooth = {}
     for pos, h in enumerate(HOURS):
